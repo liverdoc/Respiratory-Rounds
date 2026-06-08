@@ -290,52 +290,47 @@ class IntelligenceEngine:
         self.client = genai.Client(api_key=GEMINI_API_KEY)
         
     def analyze_paper(self, paper: RawPaper) -> Optional[PaperAnalysis]:
-        """Appraises a respiratory paper under a strict clinical pulmonology lens."""
-        if len(paper.abstract.strip()) < 50:
-            st.warning(f"Skipped PMID {paper.pmid}: Abstract too short (<50 chars).")
-            return None
-
-        system_prompt = """You are an elite Consultant Respiratory Physician (Pulmonologist) and clinical trialist grading articles for an academic specialist panel.
+        """Runs the core Gemini analysis on a single paper with a robust cloud backoff delay."""
+        # Clean up abstract text
+        abstract_clean = paper.abstract if paper.abstract else "Abstract not available."
         
-CRITICAL CLINICAL LENS DIRECTIONS:
-1. Prioritize these specific fields with extreme relevance weights: Pulmonary Hypertension (PAH/CTEPH pathways), Interstitial Lung Disease (ILD/IPF antifibrotics), Asthma (biologics, airway remodeling), COPD (triple therapies, exacerbation metrics), Lung Cancer (screening, staging, mutations), Bronchoscopy, and EBUS (lymph node staging metrics, diagnostic sensitivity).
-2. Heavily scrutinize trials. Is look-back or abstract spin trying to cover up missed primary endpoints? Be highly skeptical if a study celebrates minor FEV1 changes but ignores raw clinical exacerbation metrics or overall survival numbers.
-3. Critically analyze interventional diagnostics (Bronchoscopy/EBUS). Ensure you report sample size issues, rapid on-site evaluation (ROSE) biases, or operator dependency flaws.
-"""
-        user_content = f"Title: {paper.title}\nJournal: {paper.journal}\nDate: {paper.publication_date}\nAbstract: {paper.abstract}"
+        user_content = f"""Please analyze this medical paper:
+Title: {paper.title}
+Journal: {paper.journal}
+Abstract: {abstract_clean}"""
 
-        max_retries = 5
-        base_delay = 4.0  
-        time.sleep(4.5)  # Enforce spacing to honor 15 RPM Free Tier ceiling
+        # Look for the prompt structure we established
+        system_prompt = "You are an elite clinical research appraiser in respiratory medicine..."
 
-        for attempt in range(max_retries):
+        for attempt in range(3):
             try:
+                # Add a baseline safety delay before making the call
+                time.sleep(2.0) 
+                
                 response = self.client.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=user_content,
                     config=types.GenerateContentConfig(
                         system_instruction=system_prompt,
-                        temperature=0.0,
+                        temperature=0.1,
                         response_mime_type="application/json",
                         response_schema=PaperAnalysis,
                     ),
                 )
                 return PaperAnalysis.model_validate_json(response.text)
-
+                
             except Exception as e:
-                err_msg = str(e)
-                if "429" in err_msg or "503" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "UNAVAILABLE" in err_msg:
-                    if attempt == max_retries - 1:
-                        st.error(f"Failed PMID {paper.pmid} after {max_retries} attempts due to API limits.")
-                        return None
-                    
-                    sleep_time = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
-                    st.warning(f"⚠️ API limit hit (429/503). Retrying in {round(sleep_time, 1)}s...")
-                    time.sleep(sleep_time)
+                error_str = str(e).lower()
+                if "429" in error_str or "503" in error_str:
+                    # CLOUD FIX: Wait 15 seconds instead of 4.5s to completely clear the API window
+                    wait_time = 15.0 * (attempt + 1)
+                    st.warning(f"API limit hit (429/503). Cloud cooldown active... Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
                 else:
-                    st.error(f"Gemini API Error: {e}")
+                    st.error(f"Gemini Analysis Error for PMID {paper.pmid}: {e}")
                     return None
         return None
+   
 
     def generate_weekly_algorithm(self, analyses: List[PaperAnalysis]) -> str:
         """Generates a cohesive management or diagnostic protocol template from clinical papers."""
